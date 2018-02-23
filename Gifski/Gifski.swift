@@ -9,30 +9,33 @@ extension AVAssetImageGenerator {
 }
 
 final class Gifski {
-	private var frameCount = 0
-	private var frameIndex = 0
 	private(set) var isRunning = false
-	private(set) var progress: Double = 0
+	private var progress: Progress!
+
+	// `progress.fractionCompleted` is KVO-compliant, but we expose this for convenience
 	var onProgress: ((_ progress: Double) -> Void)?
 
 	/**
 	- parameters:
 		- frameRate: Clamped to 5...30. Uses the frame rate of `inputUrl` if not specified.
 	*/
+	@discardableResult
 	func convertFile(
 		_ inputUrl: URL,
 		outputUrl: URL,
 		quality: Double = 1,
 		dimensions: CGSize? = nil,
 		frameRate: Int? = nil
-	) {
+	) -> Progress {
+		/// TODO: Find a better way to handle this
 		guard !isRunning else {
-			return
+			fatalError("Create a new instance if you want to run multiple conversions at once")
 		}
 
-		frameCount = 0
-		frameIndex = 0
 		isRunning = true
+
+		progress = Progress(parent: nil, userInfo: [.fileURLKey: outputUrl])
+		progress.fileURL = outputUrl
 
 		var settings = GifskiSettings(
 			width: UInt32(dimensions?.width ?? 0),
@@ -48,17 +51,12 @@ final class Gifski {
 			let mySelf = Unmanaged<Gifski>.fromOpaque(user_data!).takeUnretainedValue()
 
 			DispatchQueue.main.async {
-				mySelf.frameIndex += 1
-
-				if mySelf.frameIndex == mySelf.frameCount {
-					mySelf.isRunning = false
-				}
-
-				mySelf.progress = Double(mySelf.frameIndex) / Double(mySelf.frameCount)
-				mySelf.onProgress?(mySelf.progress)
+				mySelf.progress.completedUnitCount += 1
+				mySelf.onProgress?(mySelf.progress.fractionCompleted)
+				mySelf.isRunning = !mySelf.progress.isFinished
 			}
 
-			return 1
+			return mySelf.progress.isCancelled ? 0 : 1
 		}, context)
 
 		DispatchQueue.global(qos: .utility).async {
@@ -68,10 +66,11 @@ final class Gifski {
 			generator.requestedTimeToleranceBefore = kCMTimeZero
 
 			let fps = (frameRate.map { Double($0) } ?? asset.videoMetadata!.frameRate).clamped(to: 5...30)
-			self.frameCount = Int(asset.duration.seconds * fps)
+			let frameCount = Int(asset.duration.seconds * fps)
+			self.progress.totalUnitCount = Int64(frameCount)
 
 			var frameForTimes = [CMTime]()
-			for i in 0..<self.frameCount {
+			for i in 0..<frameCount {
 				frameForTimes.append(CMTimeMake(Int64(i), Int32(fps)))
 			}
 
@@ -104,5 +103,7 @@ final class Gifski {
 			gifski_write(g, outputUrl.path)
 			gifski_drop(g)
 		}
+
+		return progress
 	}
 }
